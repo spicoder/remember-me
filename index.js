@@ -2,19 +2,41 @@ require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const cron = require("node-cron");
+const mongoose = require("mongoose");
 
 const app = express();
 app.use(express.json());
 
 const { PAGE_ACCESS_TOKEN, VERIFY_TOKEN, PORT } = process.env;
 
+// Connect to MongoDB Atlas
+mongoose
+  .connect(process.env.MONGODB_URI)
+  .then(() => console.log("🍃 Connected to MongoDB Atlas"))
+  .catch((err) => console.error("❌ Database connection error:", err));
+
+// Define User Schema
+const userSchema = new mongoose.Schema({
+  psid: { type: String, required: true, unique: true },
+  task_completed: { type: Boolean, default: false },
+  otn_token: { type: String, default: null },
+});
+
+const User = mongoose.model("User", userSchema);
+
+// Helper function to get or create a user in DB
+async function getOrCreateUser(psid) {
+  let user = await User.findOne({ psid });
+  if (!user) {
+    user = await User.create({ psid, task_completed: false, otn_token: null });
+  }
+  return user;
+}
+
 // Helper function to prevent rate-limiting in batch operations
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // --- 1. STATE MANAGEMENT ---
-// Database schema: db[psid] = { task_completed: boolean, otn_token: string | null }
-const db = {};
-
 function getTargetUsers() {
   if (!process.env.TARGET_PSIDS) return [];
   return process.env.TARGET_PSIDS.split(",").map((id) => id.trim());
@@ -29,16 +51,14 @@ cron.schedule(
     const users = getTargetUsers();
 
     for (const psid of users) {
-      if (!db[psid]) {
-        db[psid] = { task_completed: true, otn_token: null };
-      }
-
-      const user = db[psid];
+      // Get user directly from MongoDB
+      const user = await getOrCreateUser(psid);
 
       // Reset completion status every Thursday
       if (today === 4) {
         console.log(`Thursday reset triggered for PSID: ${psid}`);
         user.task_completed = false;
+        await user.save(); // Save changes to DB
       }
 
       // Send reminder if task is still incomplete
@@ -47,6 +67,7 @@ cron.schedule(
           await sendMessengerReminder(
             psid,
             "⏰ Reminder: Have you reminded the host for this week?",
+            user, // Pass the DB user object
           );
           // Wait 500ms between users to respect Meta's Send API rate limits
           await sleep(500);
@@ -64,20 +85,22 @@ cron.schedule(
 // --- 3. SEND API (Outbound Messages) ---
 
 // Sends a reminder with YES / NO quick reply buttons
-async function sendMessengerReminder(senderPsid, text) {
-  const user = db[senderPsid] || {};
+async function sendMessengerReminder(senderPsid, text, userRecord = null) {
+  // Fetch user if not provided
+  const user = userRecord || (await getOrCreateUser(senderPsid));
 
-  // Log token presence for debugging, but ALWAYS use recipient.id for Send API
+  // Log token presence for debugging, consume it in the DB
   if (user.otn_token) {
     console.log(`🔑 Virtual Opt-In Token active for PSID: ${senderPsid}`);
-    user.otn_token = null; // Consume virtual token
+    user.otn_token = null;
+    await user.save(); // Save token consumption to DB
   }
 
   try {
     await axios.post(
       `https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`,
       {
-        recipient: { id: senderPsid }, // 👈 Fix: Always send to recipient ID
+        recipient: { id: senderPsid },
         message: {
           text: text,
           quick_replies: [
@@ -103,6 +126,7 @@ async function sendMessengerReminder(senderPsid, text) {
     );
   }
 }
+
 // Sends an Opt-In Card with dynamic text and postback payload
 async function sendOTNRequest(senderPsid, subtitleText, payloadType) {
   try {
@@ -175,23 +199,23 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-app.post("/webhook", (req, res) => {
+// Notice: we make this function async to handle MongoDB calls
+app.post("/webhook", async (req, res) => {
   let body = req.body;
   res.status(200).send("EVENT_RECEIVED"); // Fast response to Meta
 
   if (body.object === "page") {
-    body.entry.forEach((entry) => {
-      if (!entry.messaging || entry.messaging.length === 0) return;
+    // Replaced forEach with for...of so we can safely use 'await'
+    for (let entry of body.entry) {
+      if (!entry.messaging || entry.messaging.length === 0) continue;
 
       let webhook_event = entry.messaging[0];
       let sender_psid = webhook_event.sender?.id;
 
-      if (!sender_psid) return; // Guard against events lacking a sender ID
+      if (!sender_psid) continue;
 
-      // Ensure user record exists
-      if (!db[sender_psid]) {
-        db[sender_psid] = { task_completed: false, otn_token: null };
-      }
+      // 1. Get user from MongoDB
+      const user = await getOrCreateUser(sender_psid);
 
       // A. HANDLE POSTBACK BUTTON TAPS (e.g., "Notify Me 🔔")
       if (webhook_event.postback) {
@@ -202,19 +226,21 @@ app.post("/webhook", (req, res) => {
           payload === "OPTIN_TOMORROW_REMINDER"
         ) {
           // Safeguard against duplicate button taps
-          if (db[sender_psid].otn_token) {
+          if (user.otn_token) {
             console.log(
               `⚠️ User ${sender_psid} already opted in. Ignoring duplicate tap.`,
             );
-            return;
+            continue;
           }
 
-          db[sender_psid].otn_token = `MOCK_TOKEN_${Date.now()}`;
+          // Update MongoDB
+          user.otn_token = `MOCK_TOKEN_${Date.now()}`;
+          await user.save();
+
           console.log(
-            `✅ User opted in! Virtual Token stored for PSID: ${sender_psid}`,
+            `✅ User opted in! Virtual Token stored in DB for PSID: ${sender_psid}`,
           );
 
-          // Dynamic reply based on which card they clicked
           const confirmationMsg =
             payload === "OPTIN_TOMORROW_REMINDER"
               ? "👍 Got it! I'll remind you again tomorrow at 5 PM."
@@ -231,9 +257,10 @@ app.post("/webhook", (req, res) => {
           optin.one_time_notif_token || optin.notification_messages_token;
 
         if (token) {
-          db[sender_psid].otn_token = token;
+          user.otn_token = token;
+          await user.save(); // Save to DB
           console.log(
-            `✅ Saved Notification Token for PSID ${sender_psid}: ${token}`,
+            `✅ Saved Notification Token to DB for PSID ${sender_psid}: ${token}`,
           );
           sendStandardReply(
             sender_psid,
@@ -252,11 +279,12 @@ app.post("/webhook", (req, res) => {
           : "";
 
         if (quickReplyPayload === "TASK_YES_PAYLOAD" || text === "yes") {
-          db[sender_psid].task_completed = true;
+          user.task_completed = true;
+          await user.save(); // Save to DB
+
           sendStandardReply(sender_psid, "✅ Marked as done!");
 
           setTimeout(() => {
-            // Send card configured for NEXT THURSDAY
             sendOTNRequest(
               sender_psid,
               "Remind you next Thursday at 5 PM?",
@@ -264,33 +292,31 @@ app.post("/webhook", (req, res) => {
             );
           }, 1000);
         } else if (quickReplyPayload === "TASK_NO_PAYLOAD" || text === "no") {
-          db[sender_psid].task_completed = false;
+          user.task_completed = false;
+          await user.save(); // Save to DB
+
           sendStandardReply(
             sender_psid,
             "Understood. Tap 'Notify Me' below so I can remind you again tomorrow!",
           );
 
           setTimeout(() => {
-            // Send card configured for TOMORROW
             sendOTNRequest(
               sender_psid,
               "Remind you tomorrow at 5 PM?",
               "OPTIN_TOMORROW_REMINDER",
             );
           }, 1000);
-        }
-
-        // 👇 THIS IS THE MISSING PART THAT CATCHES "HI" AND OTHER TEXT 👇
-        else if (text) {
+        } else if (text) {
           const greetings = ["hi", "hello", "hey", "start"];
 
           if (greetings.includes(text)) {
             sendMessengerReminder(
               sender_psid,
               "👋 Hi! Have you completed your task for this week?",
+              user,
             );
           } else {
-            // Default fallback response for random chat text
             sendStandardReply(
               sender_psid,
               "I'm an automated task reminder bot! 🤖 Use the buttons above or reply 'hi' to check your task status.",
@@ -298,7 +324,7 @@ app.post("/webhook", (req, res) => {
           }
         }
       }
-    });
+    }
   }
 });
 
