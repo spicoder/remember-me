@@ -199,11 +199,6 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-// Node.js / Express example
-app.get("/ping", (req, res) => {
-  res.status(200).send("OK");
-});
-
 // Notice: we make this function async to handle MongoDB calls
 app.post("/webhook", async (req, res) => {
   let body = req.body;
@@ -331,6 +326,17 @@ app.post("/webhook", async (req, res) => {
       }
     }
   }
+});
+
+// Ping
+app.get("/ping", (req, res) => {
+  res.status(200).send("OK");
+  console.log(
+    `🏓 Ping received at ${new Date().toLocaleString("en-US", {
+      timeZone: "Asia/Manila",
+      hour12: true,
+    })} GMT+8`,
+  );
 });
 
 // --- 5. START SERVER ---
