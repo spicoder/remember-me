@@ -199,6 +199,11 @@ app.get("/webhook", (req, res) => {
   }
 });
 
+// Node.js / Express example
+app.get("/ping", (req, res) => {
+  res.status(200).send("OK");
+});
+
 // Notice: we make this function async to handle MongoDB calls
 app.post("/webhook", async (req, res) => {
   let body = req.body;
