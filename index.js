@@ -42,11 +42,11 @@ function getTargetUsers() {
   return process.env.TARGET_PSIDS.split(",").map((id) => id.trim());
 }
 
-// --- 2. DAILY 5:00 PM SCHEDULER ---
+// --- 2. DAILY 5:05 PM SCHEDULER ---
 cron.schedule(
-  "0 17 * * *",
+  "5 17 * * *",
   async () => {
-    console.log("⏰ Running daily 5:00 PM check...");
+    console.log("⏰ Running daily 5:05 PM check...");
     const today = new Date().getDay(); // 0 = Sun, 4 = Thu
     const users = getTargetUsers();
 
@@ -243,8 +243,8 @@ app.post("/webhook", async (req, res) => {
 
           const confirmationMsg =
             payload === "OPTIN_TOMORROW_REMINDER"
-              ? "👍 Got it! I'll remind you again tomorrow at 5 PM."
-              : "👍 Got it! I'll ping you next Thursday at 5 PM.";
+              ? "👍 Got it! I'll remind you again tomorrow at 5:05 PM."
+              : "👍 Got it! I'll ping you next Thursday at 5:05 PM.";
 
           sendStandardReply(sender_psid, confirmationMsg);
         }
@@ -264,7 +264,7 @@ app.post("/webhook", async (req, res) => {
           );
           sendStandardReply(
             sender_psid,
-            "👍 Got it! I'll ping you next Thursday at 5 PM.",
+            "👍 Got it! I'll ping you next Thursday at 5:05 PM.",
           );
         }
       }
@@ -287,7 +287,7 @@ app.post("/webhook", async (req, res) => {
           setTimeout(() => {
             sendOTNRequest(
               sender_psid,
-              "Remind you next Thursday at 5 PM?",
+              "Remind you next Thursday at 5:05 PM?",
               "OPTIN_THURSDAY_REMINDER",
             );
           }, 1000);
@@ -303,7 +303,7 @@ app.post("/webhook", async (req, res) => {
           setTimeout(() => {
             sendOTNRequest(
               sender_psid,
-              "Remind you tomorrow at 5 PM?",
+              "Remind you tomorrow at 5:05 PM?",
               "OPTIN_TOMORROW_REMINDER",
             );
           }, 1000);
