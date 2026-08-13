@@ -67,7 +67,7 @@ cron.schedule(
           await sendMessengerReminder(
             psid,
             "⏰ Reminder: Have you reminded the host for this week?",
-            user, // Pass the DB user object
+            user,
           );
           // Wait 500ms between users to respect Meta's Send API rate limits
           await sleep(500);
@@ -86,21 +86,24 @@ cron.schedule(
 
 // Sends a reminder with YES / NO quick reply buttons
 async function sendMessengerReminder(senderPsid, text, userRecord = null) {
-  // Fetch user if not provided
   const user = userRecord || (await getOrCreateUser(senderPsid));
 
-  // Log token presence for debugging, consume it in the DB
-  if (user.otn_token) {
-    console.log(`🔑 Virtual Opt-In Token active for PSID: ${senderPsid}`);
-    user.otn_token = null;
-    await user.save(); // Save token consumption to DB
+  // Default to standard PSID recipient mapping
+  let recipientData = { id: senderPsid };
+  let usedOtnToken = false;
+
+  // If a valid token exists in the DB, use it instead of the PSID to bypass the 24h window
+  if (user.otn_token && !user.otn_token.startsWith("MOCK_TOKEN")) {
+    console.log(`🔑 Using real OTN Token for PSID: ${senderPsid}`);
+    recipientData = { one_time_notif_token: user.otn_token };
+    usedOtnToken = true;
   }
 
   try {
     await axios.post(
       `https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`,
       {
-        recipient: { id: senderPsid },
+        recipient: recipientData, // Passes the token if available, otherwise falls back to ID
         message: {
           text: text,
           quick_replies: [
@@ -119,6 +122,12 @@ async function sendMessengerReminder(senderPsid, text, userRecord = null) {
       },
     );
     console.log(`📤 Reminder sent to ${senderPsid}`);
+
+    // Only consume/delete the token from DB if the message was successfully sent
+    if (usedOtnToken) {
+      user.otn_token = null;
+      await user.save();
+    }
   } catch (error) {
     console.error(
       "❌ Error sending reminder:",
@@ -127,38 +136,26 @@ async function sendMessengerReminder(senderPsid, text, userRecord = null) {
   }
 }
 
-// Sends an Opt-In Card with dynamic text and postback payload
-async function sendOTNRequest(senderPsid, subtitleText, payloadType) {
+// Sends Meta's official Native Opt-In Card
+async function sendOTNRequest(senderPsid, titleText, payloadType) {
   try {
     await axios.post(
       `https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`,
       {
         recipient: { id: senderPsid },
-        messaging_type: "RESPONSE",
         message: {
           attachment: {
             type: "template",
             payload: {
-              template_type: "generic",
-              elements: [
-                {
-                  title: "Weekly Reminder Opt-In",
-                  subtitle: subtitleText,
-                  buttons: [
-                    {
-                      type: "postback",
-                      title: "Notify Me 🔔",
-                      payload: payloadType,
-                    },
-                  ],
-                },
-              ],
+              template_type: "one_time_notif_req", // Required by Meta for OTN
+              title: titleText,
+              payload: payloadType,
             },
           },
         },
       },
     );
-    console.log(`📤 Reminder Opt-In card sent to ${senderPsid}`);
+    console.log(`📤 Native OTN Opt-In card sent to ${senderPsid}`);
   } catch (error) {
     console.error(
       "❌ Error sending Opt-In card:",
@@ -199,13 +196,11 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-// Notice: we make this function async to handle MongoDB calls
 app.post("/webhook", async (req, res) => {
   let body = req.body;
   res.status(200).send("EVENT_RECEIVED"); // Fast response to Meta
 
   if (body.object === "page") {
-    // Replaced forEach with for...of so we can safely use 'await'
     for (let entry of body.entry) {
       if (!entry.messaging || entry.messaging.length === 0) continue;
 
@@ -217,28 +212,19 @@ app.post("/webhook", async (req, res) => {
       // 1. Get user from MongoDB
       const user = await getOrCreateUser(sender_psid);
 
-      // A. HANDLE POSTBACK BUTTON TAPS (e.g., "Notify Me 🔔")
-      if (webhook_event.postback) {
-        let payload = webhook_event.postback.payload;
+      // A. HANDLE OFFICIAL OTN OPT-IN RESPONSE
+      if (webhook_event.optin) {
+        const optin = webhook_event.optin;
+        // Grab the official token provided by Meta
+        const token =
+          optin.one_time_notif_token || optin.notification_messages_token;
+        const payload = optin.payload;
 
-        if (
-          payload === "OPTIN_THURSDAY_REMINDER" ||
-          payload === "OPTIN_TOMORROW_REMINDER"
-        ) {
-          // Safeguard against duplicate button taps
-          if (user.otn_token) {
-            console.log(
-              `⚠️ User ${sender_psid} already opted in. Ignoring duplicate tap.`,
-            );
-            continue;
-          }
-
-          // Update MongoDB
-          user.otn_token = `MOCK_TOKEN_${Date.now()}`;
-          await user.save();
-
+        if (token) {
+          user.otn_token = token;
+          await user.save(); // Save to DB
           console.log(
-            `✅ User opted in! Virtual Token stored in DB for PSID: ${sender_psid}`,
+            `✅ Saved Notification Token to DB for PSID ${sender_psid}: ${token}`,
           );
 
           const confirmationMsg =
@@ -250,26 +236,7 @@ app.post("/webhook", async (req, res) => {
         }
       }
 
-      // B. HANDLE OTN OPT-IN RESPONSE (Native OTN fallback)
-      else if (webhook_event.optin) {
-        const optin = webhook_event.optin;
-        const token =
-          optin.one_time_notif_token || optin.notification_messages_token;
-
-        if (token) {
-          user.otn_token = token;
-          await user.save(); // Save to DB
-          console.log(
-            `✅ Saved Notification Token to DB for PSID ${sender_psid}: ${token}`,
-          );
-          sendStandardReply(
-            sender_psid,
-            "👍 Got it! I'll ping you next Thursday at 5:05 PM.",
-          );
-        }
-      }
-
-      // C. HANDLE MESSAGES AND QUICK REPLIES
+      // B. HANDLE MESSAGES AND QUICK REPLIES
       else if (webhook_event.message) {
         let quickReplyPayload = webhook_event.message.quick_reply
           ? webhook_event.message.quick_reply.payload
