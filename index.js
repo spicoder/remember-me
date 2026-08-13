@@ -209,87 +209,108 @@ app.post("/webhook", async (req, res) => {
 
       if (!sender_psid) continue;
 
-      // 1. Get user from MongoDB
-      const user = await getOrCreateUser(sender_psid);
+      // 🔍 DEBUG: Log the incoming event
+      console.log(`\n📥 New Webhook Event from PSID: ${sender_psid}`);
+      console.log(JSON.stringify(webhook_event, null, 2));
 
-      // A. HANDLE OFFICIAL OTN OPT-IN RESPONSE
-      if (webhook_event.optin) {
-        const optin = webhook_event.optin;
-        // Grab the official token provided by Meta
-        const token =
-          optin.one_time_notif_token || optin.notification_messages_token;
-        const payload = optin.payload;
+      try {
+        // 1. Get user from MongoDB
+        const user = await getOrCreateUser(sender_psid);
+        console.log(`👤 Database check passed for PSID: ${sender_psid}`);
 
-        if (token) {
-          user.otn_token = token;
-          await user.save(); // Save to DB
-          console.log(
-            `✅ Saved Notification Token to DB for PSID ${sender_psid}: ${token}`,
-          );
+        // A. HANDLE OFFICIAL OTN OPT-IN RESPONSE
+        if (webhook_event.optin) {
+          console.log("➡️ Processing Opt-In Event...");
+          const optin = webhook_event.optin;
+          const token =
+            optin.one_time_notif_token || optin.notification_messages_token;
+          const payload = optin.payload;
 
-          const confirmationMsg =
-            payload === "OPTIN_TOMORROW_REMINDER"
-              ? "👍 Got it! I'll remind you again tomorrow at 5:05 PM."
-              : "👍 Got it! I'll ping you next Thursday at 5:05 PM.";
-
-          sendStandardReply(sender_psid, confirmationMsg);
-        }
-      }
-
-      // B. HANDLE MESSAGES AND QUICK REPLIES
-      else if (webhook_event.message) {
-        let quickReplyPayload = webhook_event.message.quick_reply
-          ? webhook_event.message.quick_reply.payload
-          : null;
-        let text = webhook_event.message.text
-          ? webhook_event.message.text.toLowerCase().trim()
-          : "";
-
-        if (quickReplyPayload === "TASK_YES_PAYLOAD" || text === "yes") {
-          user.task_completed = true;
-          await user.save(); // Save to DB
-
-          sendStandardReply(sender_psid, "✅ Marked as done!");
-
-          setTimeout(() => {
-            sendOTNRequest(
-              sender_psid,
-              "Remind you next Thursday at 5:05 PM?",
-              "OPTIN_THURSDAY_REMINDER",
+          if (token) {
+            user.otn_token = token;
+            await user.save();
+            console.log(
+              `✅ Saved Notification Token to DB for PSID ${sender_psid}: ${token}`,
             );
-          }, 1000);
-        } else if (quickReplyPayload === "TASK_NO_PAYLOAD" || text === "no") {
-          user.task_completed = false;
-          await user.save(); // Save to DB
 
-          sendStandardReply(
-            sender_psid,
-            "Understood. Tap 'Notify Me' below so I can remind you again tomorrow!",
-          );
+            const confirmationMsg =
+              payload === "OPTIN_TOMORROW_REMINDER"
+                ? "👍 Got it! I'll remind you again tomorrow at 5:05 PM."
+                : "👍 Got it! I'll ping you next Thursday at 5:05 PM.";
 
-          setTimeout(() => {
-            sendOTNRequest(
-              sender_psid,
-              "Remind you tomorrow at 5:05 PM?",
-              "OPTIN_TOMORROW_REMINDER",
-            );
-          }, 1000);
-        } else if (text) {
-          const greetings = ["hi", "hello", "hey", "start"];
-
-          if (greetings.includes(text)) {
-            sendMessengerReminder(
-              sender_psid,
-              "👋 Hi! Have you completed your task for this week?",
-              user,
-            );
-          } else {
-            sendStandardReply(
-              sender_psid,
-              "I'm an automated task reminder bot! 🤖 Use the buttons above or reply 'hi' to check your task status.",
-            );
+            sendStandardReply(sender_psid, confirmationMsg);
           }
         }
+
+        // B. HANDLE POSTBACKS (In case of Get Started buttons, etc.)
+        else if (webhook_event.postback) {
+          console.log("➡️ Processing Postback Event...");
+          let payload = webhook_event.postback.payload;
+          console.log(`Postback Payload: ${payload}`);
+          // You can add logic here if you have standard postback buttons
+        }
+
+        // C. HANDLE MESSAGES AND QUICK REPLIES
+        else if (webhook_event.message) {
+          console.log("➡️ Processing Message Event...");
+          let quickReplyPayload = webhook_event.message.quick_reply
+            ? webhook_event.message.quick_reply.payload
+            : null;
+          let text = webhook_event.message.text
+            ? webhook_event.message.text.toLowerCase().trim()
+            : "";
+
+          if (quickReplyPayload === "TASK_YES_PAYLOAD" || text === "yes") {
+            user.task_completed = true;
+            await user.save();
+            console.log("✅ User marked task as YES");
+            sendStandardReply(sender_psid, "✅ Marked as done!");
+
+            setTimeout(() => {
+              sendOTNRequest(
+                sender_psid,
+                "Remind you next Thursday at 5:05 PM?",
+                "OPTIN_THURSDAY_REMINDER",
+              );
+            }, 1000);
+          } else if (quickReplyPayload === "TASK_NO_PAYLOAD" || text === "no") {
+            user.task_completed = false;
+            await user.save();
+            console.log("🔴 User marked task as NO");
+            sendStandardReply(
+              sender_psid,
+              "Understood. Tap 'Notify Me' below so I can remind you again tomorrow!",
+            );
+
+            setTimeout(() => {
+              sendOTNRequest(
+                sender_psid,
+                "Remind you tomorrow at 5:05 PM?",
+                "OPTIN_TOMORROW_REMINDER",
+              );
+            }, 1000);
+          } else if (text) {
+            const greetings = ["hi", "hello", "hey", "start", "test"];
+
+            console.log(`💬 User said: "${text}"`);
+
+            if (greetings.includes(text)) {
+              sendMessengerReminder(
+                sender_psid,
+                "👋 Hi! Have you completed your task for this week?",
+                user,
+              );
+            } else {
+              sendStandardReply(
+                sender_psid,
+                "I'm an automated task reminder bot! 🤖 Use the buttons above or reply 'hi' to check your task status.",
+              );
+              console.log(`📤 Standard reply sent for unrecognized text.`);
+            }
+          }
+        }
+      } catch (err) {
+        console.error("❌ Critical Webhook Error:", err.message);
       }
     }
   }
